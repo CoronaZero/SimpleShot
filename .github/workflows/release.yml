@@ -23,7 +23,7 @@ jobs:
           - name: windows-x86_64
             os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary: screenshot-rs.exe
+            binary: SimpleShot.exe
 
     steps:
       - name: Checkout
@@ -45,7 +45,7 @@ jobs:
         run: |
           mkdir -p release
           cp "target/${{ matrix.target }}/release/${{ matrix.binary }}" \
-            "release/screenshot-rs-${{ matrix.name }}.exe"
+            "release/SimpleShot-${{ matrix.name }}.exe"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
