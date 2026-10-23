@@ -56,7 +56,7 @@ pub fn add(hwnd: HWND) -> Res<HICON> {
         nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         nid.uCallbackMessage = WM_TRAY;
         nid.hIcon = icon;
-        let tip = util::to_wide("截图工具");
+        let tip = util::to_wide("SimpleShot截图工具");
         for (i, c) in tip.iter().enumerate().take(127) {
             nid.szTip[i] = *c;
         }
