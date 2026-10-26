@@ -19,8 +19,9 @@ use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM
 use windows::Win32::System::Ole::CF_DIB;
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::UI::Shell::{
-    FileSaveDialog, IFileSaveDialog, IShellItem, SHGetKnownFolderPath,
-    SIGDN_DESKTOPABSOLUTEEDITING, FOLDERID_Pictures, FOLDERID_Screenshots, KF_FLAG_DEFAULT,
+    FileOpenDialog, FileSaveDialog, IFileOpenDialog, IFileSaveDialog, IShellItem,
+    SHGetKnownFolderPath, SIGDN_DESKTOPABSOLUTEEDITING, FOLDERID_Pictures, FOLDERID_Screenshots,
+    KF_FLAG_DEFAULT, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS,
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 
@@ -102,9 +103,49 @@ fn write_image(path: &Path, pixels: &[u8], w: i32, h: i32, fmt: ImgFormat) -> Re
     Ok(path.to_path_buf())
 }
 
-/// 直接保存到屏幕截图文件夹
+/// 保存目录：自定义目录优先，否则系统「屏幕截图」文件夹
+fn save_target_dir(cfg: &Config) -> Res<PathBuf> {
+    if let Some(d) = &cfg.save_dir {
+        // 自定义目录不存在时尝试创建
+        std::fs::create_dir_all(d).map_err(|e| format!("创建目录 {} 失败：{e}", d.display()))?;
+        return Ok(d.clone());
+    }
+    screenshots_dir()
+}
+
+/// 弹出系统文件夹选择对话框；返回 None 表示用户取消
+pub fn pick_folder(hwnd: HWND) -> Res<Option<PathBuf>> {
+    unsafe {
+        let dialog: IFileOpenDialog =
+            CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("创建文件夹选择对话框失败：{e}"))?;
+        dialog
+            .SetOptions(FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)
+            .map_err(|e| format!("设置对话框选项失败：{e}"))?;
+        match dialog.Show(Some(hwnd)) {
+            Ok(()) => {}
+            Err(e) => {
+                if e.code() == windows::core::HRESULT::from_win32(ERROR_CANCELLED.0) {
+                    return Ok(None);
+                }
+                return Err(format!("文件夹选择对话框出错：{e}"));
+            }
+        }
+        let item: IShellItem = dialog
+            .GetResult()
+            .map_err(|e| format!("获取所选文件夹失败：{e}"))?;
+        let ppath = item
+            .GetDisplayName(SIGDN_DESKTOPABSOLUTEEDITING)
+            .map_err(|e| format!("获取所选文件夹失败：{e}"))?;
+        let path = PathBuf::from(util::from_wide_mut(ppath));
+        CoTaskMemFree(Some(ppath.0 as *const std::ffi::c_void));
+        Ok(Some(path))
+    }
+}
+
+/// 直接保存到保存目录（自定义目录优先，否则屏幕截图文件夹）
 fn save_to_folder(cfg: &Config, pixels: &[u8], w: i32, h: i32) -> Res<PathBuf> {
-    let dir = screenshots_dir()?;
+    let dir = save_target_dir(cfg)?;
     let path = dir.join(format!("{}.{}", default_file_stem(), cfg.format.ext()));
     write_image(&path, pixels, w, h, cfg.format)
 }

@@ -42,8 +42,9 @@ use tray::{
     TID_ASPECT_16_9, TID_ASPECT_1_1, TID_ASPECT_4_3, TID_ASPECT_9_16, TID_ASPECT_CUSTOM,
     TID_ASPECT_FREE, TID_ASPECT_LAST, TID_AUTOSTART, TID_CAPTURE, TID_CLIPBOARD, TID_EXIT,
     TID_FIXED_INPUT, TID_FIXED_LAST, TID_FIXED_NONE, TID_FIXED_SHOT, TID_FMT_BMP, TID_FMT_JPEG,
-    TID_FMT_PNG, TID_HOTKEY, TID_HOTKEY2, TID_NOTIFY, TID_SAVE_ASK, TID_SAVE_FOLDER,
-    TID_SAVE_NONE, WM_LBUTTONUP_VAL, WM_RBUTTONUP_VAL, WM_TRAY,
+    TID_FMT_PNG, TID_HOTKEY, TID_HOTKEY2, TID_NOTIFY, TID_SAVE_ASK, TID_SAVE_DIR_PICK,
+    TID_SAVE_DIR_RESET, TID_SAVE_FOLDER, TID_SAVE_NONE, WM_LBUTTONUP_VAL, WM_RBUTTONUP_VAL,
+    WM_TRAY,
 };
 
 const MAIN_CLASS: &str = "SimpleShotMsgWnd";
@@ -357,6 +358,26 @@ fn on_command(hwnd: HWND, app: &mut App, id: u16) {
         TID_SAVE_FOLDER => {
             app.cfg.save = config::SaveMode::Folder;
             config::save(&app.cfg, &app.cfg_path);
+        }
+        TID_SAVE_DIR_PICK => {
+            if dialog::is_open() {
+                return;
+            }
+            match actions::pick_folder(hwnd) {
+                Ok(Some(dir)) => {
+                    app.cfg.save_dir = Some(dir.clone());
+                    config::save(&app.cfg, &app.cfg_path);
+                    tray::balloon(hwnd, &format!("保存文件夹已设为 {}", dir.display()));
+                }
+                Ok(None) => {}
+                Err(e) => tray::balloon(hwnd, &e),
+            }
+        }
+        TID_SAVE_DIR_RESET => {
+            if app.cfg.save_dir.take().is_some() {
+                config::save(&app.cfg, &app.cfg_path);
+                tray::balloon(hwnd, "已恢复默认保存文件夹（屏幕截图）");
+            }
         }
         TID_FMT_PNG => {
             app.cfg.format = config::ImgFormat::Png;

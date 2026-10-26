@@ -34,6 +34,8 @@ pub const TID_CLIPBOARD: u16 = 101;
 pub const TID_SAVE_NONE: u16 = 110;
 pub const TID_SAVE_ASK: u16 = 111;
 pub const TID_SAVE_FOLDER: u16 = 112;
+pub const TID_SAVE_DIR_PICK: u16 = 113;
+pub const TID_SAVE_DIR_RESET: u16 = 114;
 pub const TID_FMT_PNG: u16 = 120;
 pub const TID_FMT_JPEG: u16 = 121;
 pub const TID_FMT_BMP: u16 = 122;
@@ -142,11 +144,21 @@ pub fn show_menu(hwnd: HWND, cfg: &Config, has_last: bool) {
         );
         // 复制到剪贴板（开关）
         append(menu, checked(cfg.clipboard), TID_CLIPBOARD as usize, "复制到剪贴板");
-        // 保存到文件（三选一）
+        // 保存到文件（三选一 + 目录选择）
         let save = CreatePopupMenu().unwrap_or_default();
         append(save, radio(cfg.save == SaveMode::None), TID_SAVE_NONE as usize, "不保存");
         append(save, radio(cfg.save == SaveMode::Ask), TID_SAVE_ASK as usize, "保存前询问位置");
-        append(save, radio(cfg.save == SaveMode::Folder), TID_SAVE_FOLDER as usize, "保存到「屏幕截图」文件夹");
+        // 当前保存目录动态显示在菜单项上
+        let folder_text = match &cfg.save_dir {
+            Some(d) => format!("保存到文件夹：{}", d.display()),
+            None => "保存到文件夹：屏幕截图".to_string(),
+        };
+        append(save, radio(cfg.save == SaveMode::Folder), TID_SAVE_FOLDER as usize, &folder_text);
+        let _ = AppendMenuW(save, MF_SEPARATOR, 0, PCWSTR::null());
+        append(save, MF_STRING, TID_SAVE_DIR_PICK as usize, "选择保存文件夹…");
+        if cfg.save_dir.is_some() {
+            append(save, MF_STRING, TID_SAVE_DIR_RESET as usize, "恢复默认文件夹（屏幕截图）");
+        }
         let w = util::to_wide("保存到文件");
         let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, save.0 as usize, PCWSTR(w.as_ptr()));
         // 图片格式（三选一）

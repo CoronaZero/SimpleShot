@@ -67,7 +67,7 @@ pub fn format_aspect(a: Option<(i32, i32)>) -> String {
 }
 
 /// 运行配置
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct Config {
     /// 截图后复制到剪贴板
     pub clipboard: bool,
@@ -81,6 +81,8 @@ pub struct Config {
     pub aspect: Option<(i32, i32)>,
     /// 固定截取区域（虚拟屏物理像素；None = 未设置）
     pub fixed: Option<RECT>,
+    /// 保存文件夹模式的自定义目录；None = 系统屏幕截图文件夹
+    pub save_dir: Option<PathBuf>,
     /// 框选热键（修饰键 MOD_* 位组合，不含 MOD_NOREPEAT——注册时统一附加）
     pub hotkey_mods: u32,
     /// 框选热键主键虚拟键码
@@ -99,6 +101,7 @@ impl Default for Config {
             notify: true,
             aspect: None,
             fixed: None,
+            save_dir: None,
             hotkey_mods: 0,
             // 默认 PrintScreen 键（VK_SNAPSHOT）
             hotkey_vk: 0x2C,
@@ -222,6 +225,11 @@ pub fn load(path: &Path) -> Config {
     if let Some(rc) = parse_fixed(&v) {
         cfg.fixed = Some(rc);
     }
+    let v = get_str(file, &sec_actions, "save_dir");
+    let v = v.trim();
+    if !v.is_empty() {
+        cfg.save_dir = Some(PathBuf::from(v));
+    }
     let hk = get_str(file, &sec_hotkey, "key");
     if let Some((mods, vk)) = hotkey::parse_hotkey(&hk) {
         cfg.hotkey_mods = mods;
@@ -279,6 +287,15 @@ pub fn save(cfg: &Config, path: &Path) {
         },
     );
     put(sa, "notify", if cfg.notify { "true" } else { "false" });
+    put(
+        sa,
+        "save_dir",
+        &cfg
+            .save_dir
+            .as_ref()
+            .map(|d| d.display().to_string())
+            .unwrap_or_default(),
+    );
     put(sr, "aspect", &format_aspect(cfg.aspect));
     put(sr, "fixed", &cfg.fixed.map(format_fixed).unwrap_or_default());
     put(
