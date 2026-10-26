@@ -216,7 +216,7 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                             }
                             Err(e) => {
                                 let w = util::to_wide(&e);
-                                let t = util::to_wide("SimpleShot");
+                                let t = util::to_wide("Simple Shot");
                                 let _ = MessageBoxW(
                                     Some(hwnd),
                                     PCWSTR(w.as_ptr()),

@@ -1,5 +1,5 @@
 //! 配置读写：基于 Win32 原生 ini API
-//! 存储位置：exe 同目录 config.ini 优先，不可写时回退 %LOCALAPPDATA%\SimpleShot
+//! 存储位置：exe 同目录 config.ini 优先，不可写时回退 %LOCALAPPDATA%\Simple Shot
 
 use crate::hotkey;
 use crate::util::{self};
@@ -115,7 +115,7 @@ impl Config {
     }
 }
 
-/// 配置文件路径：exe 同目录优先，写不进去时回退 %LOCALAPPDATA%\SimpleShot
+/// 配置文件路径：exe 同目录优先，写不进去时回退 %LOCALAPPDATA%\Simple Shot
 pub fn config_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -124,7 +124,7 @@ pub fn config_path() -> PathBuf {
             }
         }
     }
-    let dir = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("SimpleShot");
+    let dir = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("Simple Shot");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("config.ini")
 }

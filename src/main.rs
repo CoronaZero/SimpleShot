@@ -1,4 +1,4 @@
-//! SimpleShot：轻量级 Windows 截图工具
+//! Simple Shot：轻量级 Windows 截图工具
 //! 纯 Win32 实现，唯一依赖 windows-rs。托盘常驻 + 双热键 + 矩形/窗口混合截图
 //! + 固定宽高比 + 固定区域一键截图。
 
@@ -566,7 +566,7 @@ fn apply_new_hotkey(hwnd: HWND, app: &mut App, target: i32, mods: u32, vk: u32) 
 fn msgbox(text: &str) {
     unsafe {
         let w = util::to_wide(text);
-        let t = util::to_wide("SimpleShot");
+        let t = util::to_wide("Simple Shot");
         let _ = MessageBoxW(None, PCWSTR(w.as_ptr()), PCWSTR(t.as_ptr()), MB_OK | MB_ICONERROR);
     }
 }
