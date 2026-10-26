@@ -15,13 +15,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetDlgItem, GetMessageW,
-    GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, IsDialogMessageW, IsWindow, LoadCursorW,
+    GetSystemMetrics, GetWindowTextLengthW, GetWindowTextW, HICON, IDC_ARROW, IDOK,
+    IMAGE_ICON, IsDialogMessageW, IsWindow, LoadCursorW, LoadImageW, LR_DEFAULTCOLOR,
     MessageBoxW, RegisterClassExW, SendMessageW, SetForegroundWindow, SetWindowTextW, ShowWindow,
     TranslateMessage, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, CS_HREDRAW, CS_VREDRAW, DC_HASDEFID,
-    ES_AUTOHSCROLL, IDC_ARROW, IDOK, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN,
-    SW_SHOW, WM_CLOSE, WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_SETFONT, WM_USER,
-    WNDCLASSEXW, WINDOW_EX_STYLE, WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_SYSMENU,
-    WS_TABSTOP, WS_VISIBLE, MSG, BN_CLICKED,
+    ES_AUTOHSCROLL, MB_ICONERROR, MB_OK, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WM_CLOSE, WM_COMMAND,
+    WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_SETFONT, WM_USER, WNDCLASSEXW, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WS_BORDER, WS_CAPTION, WS_CHILD, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE, MSG,
+    BN_CLICKED,
 };
 
 const CLASS: &str = "SimpleShotInputWnd";
@@ -52,7 +53,7 @@ pub fn run(owner: HWND, initial: RECT) -> Option<RECT> {
             *g = None;
         }
 
-        let win_w = 286i32;
+        let win_w = 336i32;
         let win_h = 196i32;
         let x = (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - win_h) / 2;
@@ -99,10 +100,21 @@ pub fn run(owner: HWND, initial: RECT) -> Option<RECT> {
     }
 }
 
-/// 注册窗口类（进程内一次）
+/// 注册窗口类（进程内一次）；窗口图标从 exe 内嵌资源加载，与文件/托盘图标同源
 fn register_class() {
     unsafe {
         let hinst = GetModuleHandleW(None).unwrap_or_default();
+        // 资源 ID = 1（RT_GROUP_ICON），与 exe 文件图标为同一资源
+        let icon = LoadImageW(
+            Some(hinst.into()),
+            PCWSTR(1usize as *const u16),
+            IMAGE_ICON,
+            32,
+            32,
+            LR_DEFAULTCOLOR,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default();
         let wname = util::to_wide(CLASS);
         let wc = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -111,12 +123,13 @@ fn register_class() {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinst.into(),
-            hIcon: windows::Win32::UI::WindowsAndMessaging::HICON(std::ptr::null_mut()),
+            hIcon: icon,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
             hbrBackground: HBRUSH(std::ptr::null_mut()),
             lpszMenuName: PCWSTR::null(),
             lpszClassName: PCWSTR(wname.as_ptr()),
-            hIconSm: windows::Win32::UI::WindowsAndMessaging::HICON(std::ptr::null_mut()),
+            // 小图标复用同一句柄，系统按需缩放
+            hIconSm: icon,
         };
         let _ = RegisterClassExW(&wc);
     }
@@ -229,17 +242,17 @@ unsafe fn create_controls(hwnd: HWND, initial: RECT) {
         let bs_cancel = WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32);
 
         mk("STATIC", "左上 X", ss, WINDOW_EX_STYLE(0), 0, 12, 15, 52, 16);
-        mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 152, 15, 16, 16);
+        mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 172, 15, 16, 16);
         mk("STATIC", "右下 X", ss, WINDOW_EX_STYLE(0), 0, 12, 47, 52, 16);
-        mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 152, 47, 16, 16);
+        mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 172, 47, 16, 16);
 
-        let e_x1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X1, 70, 12, 64, 22);
-        let e_y1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y1, 174, 12, 64, 22);
-        let e_x2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X2, 70, 44, 64, 22);
-        let e_y2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y2, 174, 44, 64, 22);
+        let e_x1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X1, 70, 12, 90, 22);
+        let e_y1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y1, 192, 12, 90, 22);
+        let e_x2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X2, 70, 44, 90, 22);
+        let e_y2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y2, 192, 44, 90, 22);
 
-        mk("BUTTON", "确定", bs_ok, WINDOW_EX_STYLE(0), IDOK.0, 66, 84, 70, 26);
-        mk("BUTTON", "取消", bs_cancel, WINDOW_EX_STYLE(0), 2, 152, 84, 70, 26);
+        mk("BUTTON", "确定", bs_ok, WINDOW_EX_STYLE(0), IDOK.0, 80, 84, 70, 26);
+        mk("BUTTON", "取消", bs_cancel, WINDOW_EX_STYLE(0), 2, 170, 84, 70, 26);
         mk(
             "STATIC",
             "坐标为虚拟屏物理像素，右下角须大于左上角",
@@ -248,7 +261,7 @@ unsafe fn create_controls(hwnd: HWND, initial: RECT) {
             0,
             12,
             120,
-            262,
+            300,
             16,
         );
 
