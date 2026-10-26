@@ -1,11 +1,13 @@
-//! ScreenShot-rs：轻量级 Windows 截图工具
-//! 纯 Win32 实现，唯一依赖 windows-rs。托盘常驻 + 全局热键 + 矩形/窗口混合截图。
+//! SimpleShot：轻量级 Windows 截图工具
+//! 纯 Win32 实现，唯一依赖 windows-rs。托盘常驻 + 双热键 + 矩形/窗口混合截图
+//! + 固定宽高比 + 固定区域一键截图。
 
 #![windows_subsystem = "windows"]
 
 mod actions;
 mod capture;
 mod config;
+mod dialog;
 mod hotkey;
 mod overlay;
 mod png;
@@ -16,7 +18,7 @@ use std::ffi::c_void;
 use std::path::PathBuf;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{
-    GetLastError, HWND, LPARAM, LRESULT, WPARAM, ERROR_ALREADY_EXISTS,
+    GetLastError, HWND, LPARAM, LRESULT, RECT, WPARAM, ERROR_ALREADY_EXISTS,
 };
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -26,21 +28,25 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_SYSTEM_AWARE, SetProcessDpiAwarenessContext,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetWindowLongPtrW, GetMessageW, HICON, MessageBoxW, PostQuitMessage, RegisterClassExW,
-    SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW, WM_COMMAND,
-    WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_NCCREATE, CREATESTRUCTW, MB_ICONERROR, MB_OK, MSG,
+    CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW,
+    GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, GetMessageW, HICON, MessageBoxW,
+    PostQuitMessage, RegisterClassExW, SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE,
+    WINDOW_STYLE, WNDCLASSEXW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_NCCREATE,
+    CREATESTRUCTW, MB_ICONERROR, MB_OK, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
+    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
 
 use hotkey::{M_HOOK_CANCEL, M_HOOK_SET};
 use overlay::{M_REGION_CANCEL, M_REGION_DONE};
 use tray::{
-    TID_AUTOSTART, TID_CAPTURE, TID_CLIPBOARD, TID_EXIT, TID_FMT_BMP, TID_FMT_JPEG, TID_FMT_PNG,
-    TID_HOTKEY, TID_SAVE_ASK, TID_SAVE_FOLDER, TID_SAVE_NONE, WM_LBUTTONUP_VAL,
+    TID_ASPECT_16_9, TID_ASPECT_1_1, TID_ASPECT_4_3, TID_ASPECT_9_16, TID_ASPECT_FREE,
+    TID_AUTOSTART, TID_CAPTURE, TID_CLIPBOARD, TID_EXIT, TID_FIXED_INPUT, TID_FIXED_LAST,
+    TID_FIXED_NONE, TID_FIXED_SHOT, TID_FMT_BMP, TID_FMT_JPEG, TID_FMT_PNG, TID_HOTKEY,
+    TID_HOTKEY2, TID_NOTIFY, TID_SAVE_ASK, TID_SAVE_FOLDER, TID_SAVE_NONE, WM_LBUTTONUP_VAL,
     WM_RBUTTONUP_VAL, WM_TRAY,
 };
 
-const MAIN_CLASS: &str = "ScreenShotMsgWnd";
+const MAIN_CLASS: &str = "SimpleShotMsgWnd";
 
 /// 全局应用状态（挂在主窗口 GWLP_USERDATA）
 struct App {
@@ -50,6 +56,8 @@ struct App {
     hicon: HICON,
     hoverlay: Option<HWND>,
     dib: Option<capture::Dib>,
+    /// 最近一次框选区域（虚拟屏物理像素），供「使用最近一次选区」固定
+    last_region: Option<RECT>,
 }
 
 fn main() {
@@ -68,7 +76,7 @@ fn main() {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
         // 单实例互斥体：已有实例则静默退出
-        let name = util::to_wide("Local\\ScreenshotRS_Instance");
+        let name = util::to_wide("Local\\SimpleShot_Instance");
         let _mutex = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
         if GetLastError() == ERROR_ALREADY_EXISTS {
             return;
@@ -95,6 +103,7 @@ fn main() {
             hicon: HICON(std::ptr::null_mut()),
             hoverlay: None,
             dib: None,
+            last_region: None,
         });
         let name_w = util::to_wide(MAIN_CLASS);
         let _hwnd = match CreateWindowExW(
@@ -172,7 +181,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
 
         match msg {
             WM_CREATE => {
-                // 初始化托盘与热键
+                // 初始化托盘与双热键
                 match tray::add(hwnd) {
                     Ok(icon) => app.hicon = icon,
                     Err(e) => {
@@ -180,14 +189,31 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                         return LRESULT(-1); // 取消窗口创建
                     }
                 }
-                if let Err(e) = hotkey::register(hwnd, app.cfg.hotkey_mods, app.cfg.hotkey_vk) {
+                if let Err(e) = hotkey::register(
+                    hwnd,
+                    hotkey::HOTKEY_CAPTURE,
+                    app.cfg.hotkey_mods,
+                    app.cfg.hotkey_vk,
+                ) {
                     tray::balloon(hwnd, &format!("{e}，可通过托盘菜单更换快捷键"));
+                }
+                if app.cfg.hotkey2_vk != 0 {
+                    if let Err(e) = hotkey::register(
+                        hwnd,
+                        hotkey::HOTKEY_FIXED,
+                        app.cfg.hotkey2_mods,
+                        app.cfg.hotkey2_vk,
+                    ) {
+                        tray::balloon(hwnd, &format!("{e}，可通过托盘菜单更换固定区域快捷键"));
+                    }
                 }
                 LRESULT(0)
             }
             WM_HOTKEY => {
-                if wparam.0 as i32 == hotkey::HOTKEY_ID {
-                    start_capture(app);
+                match wparam.0 as i32 {
+                    hotkey::HOTKEY_CAPTURE => start_capture(app),
+                    hotkey::HOTKEY_FIXED => fixed_capture(app),
+                    _ => {}
                 }
                 LRESULT(0)
             }
@@ -196,7 +222,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 if mouse == WM_LBUTTONUP_VAL {
                     start_capture(app);
                 } else if mouse == WM_RBUTTONUP_VAL {
-                    tray::show_menu(hwnd, &app.cfg);
+                    tray::show_menu(hwnd, &app.cfg, app.last_region.is_some());
                 }
                 LRESULT(0)
             }
@@ -216,7 +242,11 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             }
             M_HOOK_SET => {
                 hotkey::stop_listening();
-                apply_new_hotkey(hwnd, app, wparam.0 as u32, lparam.0 as u32);
+                // wparam = (目标热键 ID << 16) | 修饰键，lparam = 虚拟键码
+                let target = (wparam.0 >> 16) as i32;
+                let mods = (wparam.0 & 0xFFFF) as u32;
+                let vk = lparam.0 as u32;
+                apply_new_hotkey(hwnd, app, target, mods, vk);
                 LRESULT(0)
             }
             M_HOOK_CANCEL => {
@@ -226,7 +256,8 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
             }
             WM_DESTROY => {
                 tray::remove(hwnd);
-                hotkey::unregister(hwnd);
+                hotkey::unregister(hwnd, hotkey::HOTKEY_CAPTURE);
+                hotkey::unregister(hwnd, hotkey::HOTKEY_FIXED);
                 let _ = DestroyIcon(app.hicon);
                 PostQuitMessage(0);
                 // 释放应用状态
@@ -239,9 +270,9 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
     }
 }
 
-/// 触发一次截图（已有遮罩窗口时忽略）
+/// 触发一次交互截图（已有遮罩窗口或输入对话框打开时忽略）
 fn start_capture(app: &mut App) {
-    if app.hoverlay.is_some() {
+    if app.hoverlay.is_some() || dialog::is_open() {
         return;
     }
     let dib = match capture::capture_virtual_screen() {
@@ -251,7 +282,7 @@ fn start_capture(app: &mut App) {
             return;
         }
     };
-    match overlay::create(app.hmain, &dib) {
+    match overlay::create(app.hmain, &dib, app.cfg.aspect.ratio()) {
         Ok(h) => {
             app.hoverlay = Some(h);
             app.dib = Some(dib);
@@ -260,12 +291,44 @@ fn start_capture(app: &mut App) {
     }
 }
 
-/// 处理选区完成：裁剪并执行截图后动作
+/// 固定区域一键截图：不进遮罩，直接后台截取并执行动作
+fn fixed_capture(app: &mut App) {
+    let Some(fixed) = app.cfg.fixed else { return };
+    if dialog::is_open() {
+        return;
+    }
+    let dib = match capture::capture_virtual_screen() {
+        Ok(d) => d,
+        Err(e) => {
+            tray::balloon(app.hmain, &e);
+            return;
+        }
+    };
+    // 虚拟屏坐标转 DIB 本地坐标；crop 内部负责 clamp 到当前屏幕
+    let rc_local = RECT {
+        left: fixed.left - dib.vx,
+        top: fixed.top - dib.vy,
+        right: fixed.right - dib.vx,
+        bottom: fixed.bottom - dib.vy,
+    };
+    match capture::crop(&dib, rc_local) {
+        Some((px, w, h)) => actions::perform(app.hmain, &app.cfg, px, w, h),
+        None => tray::balloon(app.hmain, "固定区域超出当前屏幕范围"),
+    }
+}
+
+/// 处理选区完成：裁剪并执行截图后动作，同时记录最近选区（虚拟屏坐标）
 fn on_region_done(hwnd: HWND, app: &mut App) {
     let rc = overlay::REGION.lock().ok().and_then(|mut g| g.take());
     let dib = app.dib.take();
     app.hoverlay = None;
     if let (Some(rc), Some(dib)) = (rc, dib) {
+        app.last_region = Some(RECT {
+            left: rc.left + dib.vx,
+            top: rc.top + dib.vy,
+            right: rc.right + dib.vx,
+            bottom: rc.bottom + dib.vy,
+        });
         if let Some((px, w, h)) = capture::crop(&dib, rc) {
             actions::perform(hwnd, &app.cfg, px, w, h);
         }
@@ -274,8 +337,10 @@ fn on_region_done(hwnd: HWND, app: &mut App) {
 
 /// 托盘菜单命令分发
 fn on_command(hwnd: HWND, app: &mut App, id: u16) {
+    use config::Aspect;
     match id {
         TID_CAPTURE => start_capture(app),
+        TID_FIXED_SHOT => fixed_capture(app),
         TID_CLIPBOARD => {
             app.cfg.clipboard = !app.cfg.clipboard;
             config::save(&app.cfg, &app.cfg_path);
@@ -306,6 +371,69 @@ fn on_command(hwnd: HWND, app: &mut App, id: u16) {
             app.cfg.format = config::ImgFormat::Bmp;
             config::save(&app.cfg, &app.cfg_path);
         }
+        // ---------- 宽高比 ----------
+        TID_ASPECT_FREE => {
+            app.cfg.aspect = Aspect::Free;
+            config::save(&app.cfg, &app.cfg_path);
+        }
+        TID_ASPECT_1_1 => {
+            app.cfg.aspect = Aspect::A1x1;
+            config::save(&app.cfg, &app.cfg_path);
+        }
+        TID_ASPECT_4_3 => {
+            app.cfg.aspect = Aspect::A4x3;
+            config::save(&app.cfg, &app.cfg_path);
+        }
+        TID_ASPECT_16_9 => {
+            app.cfg.aspect = Aspect::A16x9;
+            config::save(&app.cfg, &app.cfg_path);
+        }
+        TID_ASPECT_9_16 => {
+            app.cfg.aspect = Aspect::A9x16;
+            config::save(&app.cfg, &app.cfg_path);
+        }
+        // ---------- 固定区域 ----------
+        TID_FIXED_NONE => {
+            if app.cfg.fixed.take().is_some() {
+                config::save(&app.cfg, &app.cfg_path);
+                tray::balloon(hwnd, "已清除固定区域");
+            }
+        }
+        TID_FIXED_LAST => {
+            if let Some(rc) = app.last_region {
+                app.cfg.fixed = Some(rc);
+                config::save(&app.cfg, &app.cfg_path);
+                tray::balloon(
+                    hwnd,
+                    &format!(
+                        "固定区域已设为 ({}, {})-({}, {})",
+                        rc.left, rc.top, rc.right, rc.bottom
+                    ),
+                );
+            }
+        }
+        TID_FIXED_INPUT => {
+            if dialog::is_open() {
+                return;
+            }
+            let initial = app.cfg.fixed.unwrap_or_else(default_fixed_rect);
+            if let Some(rc) = dialog::run(hwnd, initial) {
+                app.cfg.fixed = Some(rc);
+                config::save(&app.cfg, &app.cfg_path);
+                tray::balloon(
+                    hwnd,
+                    &format!(
+                        "固定区域已设为 ({}, {})-({}, {})",
+                        rc.left, rc.top, rc.right, rc.bottom
+                    ),
+                );
+            }
+        }
+        // ---------- 其他设置 ----------
+        TID_NOTIFY => {
+            app.cfg.notify = !app.cfg.notify;
+            config::save(&app.cfg, &app.cfg_path);
+        }
         TID_AUTOSTART => {
             let on = !tray::autostart_enabled();
             match tray::autostart_set(on) {
@@ -316,14 +444,36 @@ fn on_command(hwnd: HWND, app: &mut App, id: u16) {
                 Err(e) => tray::balloon(hwnd, &e),
             }
         }
-        TID_HOTKEY => match hotkey::start_listening(hwnd) {
+        TID_HOTKEY => match hotkey::start_listening(hwnd, hotkey::HOTKEY_CAPTURE) {
             Ok(()) => tray::balloon(hwnd, "请按下新的快捷键组合（按 Esc 取消）"),
+            Err(e) => tray::balloon(hwnd, &e),
+        },
+        TID_HOTKEY2 => match hotkey::start_listening(hwnd, hotkey::HOTKEY_FIXED) {
+            Ok(()) => tray::balloon(hwnd, "请按下新的固定区域快捷键组合（按 Esc 取消）"),
             Err(e) => tray::balloon(hwnd, &e),
         },
         TID_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
         },
         _ => {}
+    }
+}
+
+/// 输入对话框的默认值：屏幕中心 400×300
+fn default_fixed_rect() -> RECT {
+    unsafe {
+        let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+        let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+        let cx = vx + vw / 2;
+        let cy = vy + vh / 2;
+        RECT {
+            left: cx - 200,
+            top: cy - 150,
+            right: cx + 200,
+            bottom: cy + 150,
+        }
     }
 }
 
@@ -334,24 +484,35 @@ fn warn_if_no_action(hwnd: HWND, app: &App) {
     }
 }
 
-/// 应用新热键：注册失败则回退旧热键
-fn apply_new_hotkey(hwnd: HWND, app: &mut App, mods: u32, vk: u32) {
-    hotkey::unregister(hwnd);
-    if hotkey::register(hwnd, mods, vk).is_ok() {
-        app.cfg.hotkey_mods = mods;
-        app.cfg.hotkey_vk = vk;
+/// 应用新热键：按目标分别写回；注册失败则回退旧热键
+fn apply_new_hotkey(hwnd: HWND, app: &mut App, target: i32, mods: u32, vk: u32) {
+    let (cur_mods, cur_vk) = if target == hotkey::HOTKEY_FIXED {
+        (app.cfg.hotkey2_mods, app.cfg.hotkey2_vk)
+    } else {
+        (app.cfg.hotkey_mods, app.cfg.hotkey_vk)
+    };
+    hotkey::unregister(hwnd, target);
+    if hotkey::register(hwnd, target, mods, vk).is_ok() {
+        if target == hotkey::HOTKEY_FIXED {
+            app.cfg.hotkey2_mods = mods;
+            app.cfg.hotkey2_vk = vk;
+        } else {
+            app.cfg.hotkey_mods = mods;
+            app.cfg.hotkey_vk = vk;
+        }
         config::save(&app.cfg, &app.cfg_path);
         tray::balloon(hwnd, &format!("新快捷键：{}", hotkey::format_hotkey(mods, vk)));
     } else {
         // 新组合被占用，恢复旧热键
-        let _ = hotkey::register(hwnd, app.cfg.hotkey_mods, app.cfg.hotkey_vk);
-        tray::balloon(
-            hwnd,
-            &format!(
-                "该组合已被其他程序占用，仍使用 {}",
-                hotkey::format_hotkey(app.cfg.hotkey_mods, app.cfg.hotkey_vk)
-            ),
-        );
+        if cur_vk != 0 {
+            let _ = hotkey::register(hwnd, target, cur_mods, cur_vk);
+        }
+        let cur_name = if cur_vk == 0 {
+            "未设置".to_string()
+        } else {
+            hotkey::format_hotkey(cur_mods, cur_vk)
+        };
+        tray::balloon(hwnd, &format!("该组合已被其他程序占用，仍使用 {cur_name}"));
     }
 }
 
@@ -359,7 +520,7 @@ fn apply_new_hotkey(hwnd: HWND, app: &mut App, mods: u32, vk: u32) {
 fn msgbox(text: &str) {
     unsafe {
         let w = util::to_wide(text);
-        let t = util::to_wide("ScreenShot-rs");
+        let t = util::to_wide("SimpleShot");
         let _ = MessageBoxW(None, PCWSTR(w.as_ptr()), PCWSTR(t.as_ptr()), MB_OK | MB_ICONERROR);
     }
 }

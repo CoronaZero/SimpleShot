@@ -76,6 +76,8 @@ struct OverlayState {
     hover: Option<(RECT, String)>,
     /// 按下瞬间快照的窗口边界
     pending_win: Option<RECT>,
+    /// 锁定的宽高比 (宽, 高)；自由比例时为 None
+    aspect: Option<(i32, i32)>,
 }
 
 impl Drop for OverlayState {
@@ -113,7 +115,7 @@ pub fn register_class() -> Res<()> {
 }
 
 /// 创建覆盖整个虚拟桌面的遮罩窗口（全屏置顶）
-pub fn create(app_hwnd: HWND, dib: &Dib) -> Res<HWND> {
+pub fn create(app_hwnd: HWND, dib: &Dib, aspect: Option<(i32, i32)>) -> Res<HWND> {
     let (dim, dim_dc) = make_dim()?;
     let mut cur = POINT::default();
     unsafe {
@@ -134,6 +136,7 @@ pub fn create(app_hwnd: HWND, dib: &Dib) -> Res<HWND> {
         cur,
         hover: None,
         pending_win: None,
+        aspect,
     });
     let name_w = util::to_wide(CLASS);
     unsafe {
@@ -257,8 +260,12 @@ fn on_move(hwnd: HWND, st: &mut OverlayState) {
             st.hover = None;
         }
     } else {
-        // 悬停识别
-        st.hover = find_window_at(st.cur);
+        // 悬停识别（锁定宽高比时禁用窗口捕获，纯矩形拖拽）
+        st.hover = if st.aspect.is_some() {
+            None
+        } else {
+            find_window_at(st.cur)
+        };
     }
     unsafe {
         let _ = InvalidateRect(Some(hwnd), None, false);
@@ -272,8 +279,12 @@ fn on_down(hwnd: HWND, st: &mut OverlayState) {
     st.cur = st.start;
     st.pressed = true;
     st.dragging = false;
-    // 按下瞬间快照悬停窗口（若有效），避免拖动中窗口动画导致错位
-    st.pending_win = st.hover.as_ref().map(|(rc, _)| *rc);
+    // 按下瞬间快照悬停窗口（若有效），避免拖动中窗口动画导致错位；锁定比例时无窗口捕获
+    st.pending_win = if st.aspect.is_some() {
+        None
+    } else {
+        st.hover.as_ref().map(|(rc, _)| *rc)
+    };
     unsafe {
         let _ = SetCapture(hwnd);
     }
@@ -283,28 +294,54 @@ fn on_up(hwnd: HWND, st: &mut OverlayState) {
     // 先快照判定结果，再释放捕获（释放会触发 WM_CAPTURECHANGED 清状态）
     let dragging = st.dragging;
     let pending = st.pending_win;
-    let start = st.start;
-    let mut cur = POINT::default();
-    unsafe {
-        let _ = GetCursorPos(&mut cur);
-        let _ = ReleaseCapture();
-    }
     if dragging {
-        finish_rect(hwnd, st, norm_rect(start, cur));
+        // 比例锁定在 drag_rect 内统一应用
+        let rc = drag_rect(st);
+        if rc.right > rc.left && rc.bottom > rc.top {
+            finish_rect(hwnd, st, rc);
+        } else {
+            finish_cancel(hwnd, st);
+        }
     } else if let Some(rc) = pending {
         finish_rect(hwnd, st, rc);
     } else {
         // 未拖拽且无有效窗口：静默取消
         finish_cancel(hwnd, st);
     }
+    unsafe {
+        let _ = ReleaseCapture();
+    }
 }
 
-fn norm_rect(a: POINT, b: POINT) -> RECT {
+/// 拖拽选区矩形：以按下点为固定角，向鼠标方向展开；
+/// 锁定宽高比时矩形在按下点→鼠标点范围内按比例最大化（不越过鼠标点）
+fn drag_rect(st: &OverlayState) -> RECT {
+    let (a, b) = (st.start, st.cur);
+    let dx = (b.x - a.x).abs();
+    let dy = (b.y - a.y).abs();
+    let (w, h) = if let Some((rw, rh)) = st.aspect {
+        // 候选宽 = |dy| * rw / rh（由高驱动）；取两驱动中的较小约束，等比例缩到框内
+        let cand_w = dy * rw / rh;
+        let w = dx.min(cand_w);
+        (w, w * rh / rw)
+    } else {
+        (dx, dy)
+    };
+    let (x1, x2) = if b.x >= a.x {
+        (a.x, a.x + w)
+    } else {
+        (a.x - w, a.x)
+    };
+    let (y1, y2) = if b.y >= a.y {
+        (a.y, a.y + h)
+    } else {
+        (a.y - h, a.y)
+    };
     RECT {
-        left: a.x.min(b.x),
-        top: a.y.min(b.y),
-        right: a.x.max(b.x),
-        bottom: a.y.max(b.y),
+        left: x1,
+        top: y1,
+        right: x2,
+        bottom: y2,
     }
 }
 
@@ -418,10 +455,17 @@ unsafe extern "system" fn enum_windows_proc(hwnd: HWND, lparam: LPARAM) -> BOOL 
 // ---------- 绘制 ----------
 
 /// 当前提亮区域：拖拽矩形 / 按下快照窗口 / 悬停窗口
+/// 标签：拖拽显示「起点坐标 · 宽 × 高」；悬停显示「标题 · 鼠标坐标」
 fn current_selection(st: &OverlayState) -> Option<(RECT, String)> {
     if st.dragging {
-        let rc = norm_rect(st.start, st.cur);
-        let label = format!("{} × {}", rc.right - rc.left, rc.bottom - rc.top);
+        let rc = drag_rect(st);
+        let label = format!(
+            "({}, {}) · {} × {}",
+            st.start.x,
+            st.start.y,
+            rc.right - rc.left,
+            rc.bottom - rc.top
+        );
         Some((rc, label))
     } else if st.pressed {
         st.pending_win.map(|rc| {
@@ -433,7 +477,14 @@ fn current_selection(st: &OverlayState) -> Option<(RECT, String)> {
             (rc, label)
         })
     } else {
-        st.hover.clone()
+        st.hover.as_ref().map(|(rc, title)| {
+            let label = format!("{} · ({}, {})",
+                if title.is_empty() { "窗口" } else { title.as_str() },
+                st.cur.x,
+                st.cur.y
+            );
+            (*rc, label)
+        })
     }
 }
 
@@ -515,6 +566,13 @@ fn paint(hwnd: HWND, st: &mut OverlayState) {
         } else {
             // 无选区：全屏整体变暗
             let _ = AlphaBlend(mem, 0, 0, st.w, st.h, st.dim_dc, 0, 0, 1, 1, blend);
+            // 悬停空白桌面且未按下：鼠标旁显示当前坐标（便于记录位置设固定区域）
+            if !st.pressed && st.hover.is_none() {
+                let label = format!("({}, {})", st.cur.x, st.cur.y);
+                let mx = st.cur.x - st.vx + 14;
+                let my = st.cur.y - st.vy + 18;
+                draw_tag(mem, st, mx, my, &label);
+            }
         }
 
         let _ = BitBlt(dc, 0, 0, st.w, st.h, Some(mem), 0, 0, SRCCOPY);
@@ -562,6 +620,28 @@ unsafe fn draw_label(dc: HDC, st: &OverlayState, rc: &RECT, label: &str) {
         if x < 0 {
             x = 0;
         }
+        draw_tag_at(dc, x, y, &mut text, tw, th);
+    }
+}
+
+/// 在指定位置画坐标小标签（自动在屏幕边缘内收拢）
+unsafe fn draw_tag(dc: HDC, st: &OverlayState, x: i32, y: i32, label: &str) {
+    unsafe {
+        let mut text = util::to_wide(label);
+        let mut brc = RECT::default();
+        DrawTextW(dc, &mut text, &mut brc, DT_CALCRECT | DT_SINGLELINE);
+        let tw = (brc.right - brc.left).max(0);
+        let th = (brc.bottom - brc.top).max(0);
+        let x = (x.max(0)).min(st.w - tw - 8);
+        let y = (y.max(0)).min(st.h - th - 8);
+        draw_tag_at(dc, x, y, &mut text, tw, th);
+    }
+}
+
+/// 标签绘制核心：深色底 + 白字
+unsafe fn draw_tag_at(dc: HDC, x: i32, y: i32, text: &mut [u16], tw: i32, th: i32) {
+    unsafe {
+        let pad = 4;
         let frc = RECT {
             left: x,
             top: y,
@@ -581,7 +661,7 @@ unsafe fn draw_label(dc: HDC, st: &OverlayState, rc: &RECT, label: &str) {
             right: x + pad + tw,
             bottom: y + pad + th,
         };
-        DrawTextW(dc, &mut text, &mut trc, DT_SINGLELINE);
+        DrawTextW(dc, text, &mut trc, DT_SINGLELINE);
         SelectObject(dc, old_font);
     }
 }

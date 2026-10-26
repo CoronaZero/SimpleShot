@@ -17,9 +17,10 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIcon, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, HICON,
     HMENU, IMAGE_ICON, LR_DEFAULTCOLOR, MF_CHECKED, MF_POPUP, MF_SEPARATOR, MF_STRING,
-    MENU_ITEM_FLAGS, LoadImageW, SetForegroundWindow, TrackPopupMenu, TPM_BOTTOMALIGN,
-    TPM_RIGHTBUTTON, WM_APP,
+    MENU_ITEM_FLAGS, MF_GRAYED, LoadImageW, SetForegroundWindow, TrackPopupMenu,
+    TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WM_APP,
 };
+use crate::config::Aspect;
 
 /// 托盘回调消息（NOTIFYICONDATAW.uCallbackMessage）
 pub const WM_TRAY: u32 = WM_APP + 1;
@@ -40,6 +41,18 @@ pub const TID_FMT_BMP: u16 = 122;
 pub const TID_AUTOSTART: u16 = 130;
 pub const TID_HOTKEY: u16 = 140;
 pub const TID_EXIT: u16 = 150;
+// v2.0 新增
+pub const TID_FIXED_SHOT: u16 = 160;
+pub const TID_ASPECT_FREE: u16 = 170;
+pub const TID_ASPECT_1_1: u16 = 171;
+pub const TID_ASPECT_4_3: u16 = 172;
+pub const TID_ASPECT_16_9: u16 = 173;
+pub const TID_ASPECT_9_16: u16 = 174;
+pub const TID_FIXED_NONE: u16 = 180;
+pub const TID_FIXED_LAST: u16 = 181;
+pub const TID_FIXED_INPUT: u16 = 182;
+pub const TID_NOTIFY: u16 = 190;
+pub const TID_HOTKEY2: u16 = 200;
 
 const TRAY_UID: u32 = 1;
 const RUN_KEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -98,7 +111,8 @@ pub fn balloon(hwnd: HWND, text: &str) {
 }
 
 /// 弹出托盘右键菜单；选择项通过 WM_COMMAND 派发回 hwnd
-pub fn show_menu(hwnd: HWND, cfg: &Config) {
+/// `has_last`：是否存在最近一次选区（用于固定区域子菜单的可用性）
+pub fn show_menu(hwnd: HWND, cfg: &Config, has_last: bool) {
     unsafe {
         let Ok(menu) = CreatePopupMenu() else { return };
         let checked = |on: bool| {
@@ -108,30 +122,73 @@ pub fn show_menu(hwnd: HWND, cfg: &Config) {
                 MF_STRING
             }
         };
+        let radio = |on: bool| {
+            if on {
+                MF_STRING | MF_CHECKED
+            } else {
+                MF_STRING
+            }
+        };
 
         // 立即截图
         append(menu, MF_STRING, TID_CAPTURE as usize, "立即截图");
+        // 截取固定区域（未设置置灰）
+        append(
+            menu,
+            if cfg.fixed.is_some() { MF_STRING } else { MF_STRING | MF_GRAYED },
+            TID_FIXED_SHOT as usize,
+            "截取固定区域",
+        );
         // 复制到剪贴板（开关）
         append(menu, checked(cfg.clipboard), TID_CLIPBOARD as usize, "复制到剪贴板");
         // 保存到文件（三选一）
         let save = CreatePopupMenu().unwrap_or_default();
-        append(save, checked(cfg.save == SaveMode::None), TID_SAVE_NONE as usize, "不保存");
-        append(save, checked(cfg.save == SaveMode::Ask), TID_SAVE_ASK as usize, "保存前询问位置");
-        append(save, checked(cfg.save == SaveMode::Folder), TID_SAVE_FOLDER as usize, "保存到「屏幕截图」文件夹");
+        append(save, radio(cfg.save == SaveMode::None), TID_SAVE_NONE as usize, "不保存");
+        append(save, radio(cfg.save == SaveMode::Ask), TID_SAVE_ASK as usize, "保存前询问位置");
+        append(save, radio(cfg.save == SaveMode::Folder), TID_SAVE_FOLDER as usize, "保存到「屏幕截图」文件夹");
         let w = util::to_wide("保存到文件");
         let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, save.0 as usize, PCWSTR(w.as_ptr()));
         // 图片格式（三选一）
         let fmt = CreatePopupMenu().unwrap_or_default();
-        append(fmt, checked(cfg.format == crate::config::ImgFormat::Png), TID_FMT_PNG as usize, "PNG");
-        append(fmt, checked(cfg.format == crate::config::ImgFormat::Jpeg), TID_FMT_JPEG as usize, "JPEG");
-        append(fmt, checked(cfg.format == crate::config::ImgFormat::Bmp), TID_FMT_BMP as usize, "BMP");
+        append(fmt, radio(cfg.format == crate::config::ImgFormat::Png), TID_FMT_PNG as usize, "PNG");
+        append(fmt, radio(cfg.format == crate::config::ImgFormat::Jpeg), TID_FMT_JPEG as usize, "JPEG");
+        append(fmt, radio(cfg.format == crate::config::ImgFormat::Bmp), TID_FMT_BMP as usize, "BMP");
         let w = util::to_wide("图片格式");
         let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, fmt.0 as usize, PCWSTR(w.as_ptr()));
-        // 开机自启（开关）
-        append(menu, checked(autostart_enabled()), TID_AUTOSTART as usize, "开机自启");
-        // 修改快捷键
+
+        // ---------- 设置子菜单 ----------
+        let settings = CreatePopupMenu().unwrap_or_default();
+        // 宽高比（五档）
+        let aspect = CreatePopupMenu().unwrap_or_default();
+        append(aspect, radio(cfg.aspect == Aspect::Free), TID_ASPECT_FREE as usize, "自由");
+        append(aspect, radio(cfg.aspect == Aspect::A1x1), TID_ASPECT_1_1 as usize, "1:1");
+        append(aspect, radio(cfg.aspect == Aspect::A4x3), TID_ASPECT_4_3 as usize, "4:3");
+        append(aspect, radio(cfg.aspect == Aspect::A16x9), TID_ASPECT_16_9 as usize, "16:9");
+        append(aspect, radio(cfg.aspect == Aspect::A9x16), TID_ASPECT_9_16 as usize, "9:16");
+        let w = util::to_wide("宽高比");
+        let _ = AppendMenuW(settings, MF_STRING | MF_POPUP, aspect.0 as usize, PCWSTR(w.as_ptr()));
+        // 固定区域
+        let fixed = CreatePopupMenu().unwrap_or_default();
+        let (fixed_state_text, fixed_state_on) = match cfg.fixed {
+            None => ("未设置".to_string(), true),
+            Some(rc) => (
+                format!("已设置 ({}, {})-({}, {})，点击清除", rc.left, rc.top, rc.right, rc.bottom),
+                true,
+            ),
+        };
+        append(fixed, checked(fixed_state_on), TID_FIXED_NONE as usize, &fixed_state_text);
         append(
-            menu,
+            fixed,
+            if has_last { MF_STRING } else { MF_STRING | MF_GRAYED },
+            TID_FIXED_LAST as usize,
+            "使用最近一次选区",
+        );
+        append(fixed, MF_STRING, TID_FIXED_INPUT as usize, "手动输入…");
+        let w = util::to_wide("固定区域");
+        let _ = AppendMenuW(settings, MF_STRING | MF_POPUP, fixed.0 as usize, PCWSTR(w.as_ptr()));
+        // 两个快捷键
+        append(
+            settings,
             MF_STRING,
             TID_HOTKEY as usize,
             &format!(
@@ -139,6 +196,20 @@ pub fn show_menu(hwnd: HWND, cfg: &Config) {
                 hotkey::format_hotkey(cfg.hotkey_mods, cfg.hotkey_vk)
             ),
         );
+        let hk2 = hotkey::format_hotkey(cfg.hotkey2_mods, cfg.hotkey2_vk);
+        append(
+            settings,
+            MF_STRING,
+            TID_HOTKEY2 as usize,
+            &format!("修改固定区域快捷键…（当前：{}）", if hk2.is_empty() { "未设置".into() } else { hk2 }),
+        );
+        // 截图完成提示（开关，错误不受影响）
+        append(settings, checked(cfg.notify), TID_NOTIFY as usize, "截图完成提示");
+        // 开机自启（开关）
+        append(settings, checked(autostart_enabled()), TID_AUTOSTART as usize, "开机自启");
+        let w = util::to_wide("设置");
+        let _ = AppendMenuW(menu, MF_STRING | MF_POPUP, settings.0 as usize, PCWSTR(w.as_ptr()));
+
         // 分隔线 + 退出
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
         append(menu, MF_STRING, TID_EXIT as usize, "退出");

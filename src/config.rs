@@ -1,10 +1,11 @@
 //! 配置读写：基于 Win32 原生 ini API
-//! 存储位置：exe 同目录 config.ini 优先，不可写时回退 %LOCALAPPDATA%\Screenshot-rs
+//! 存储位置：exe 同目录 config.ini 优先，不可写时回退 %LOCALAPPDATA%\SimpleShot
 
 use crate::hotkey;
-use crate::util::{self, Res};
+use crate::util::{self};
 use std::path::{Path, PathBuf};
 use windows::core::PCWSTR;
+use windows::Win32::Foundation::RECT;
 use windows::Win32::System::WindowsProgramming::{
     GetPrivateProfileStringW, WritePrivateProfileStringW,
 };
@@ -38,6 +39,61 @@ impl ImgFormat {
     }
 }
 
+/// 框选宽高比档位
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Aspect {
+    Free,
+    A1x1,
+    A4x3,
+    A16x9,
+    A9x16,
+}
+
+impl Aspect {
+    /// 返回 (宽, 高) 比例；自由比例返回 None
+    pub fn ratio(self) -> Option<(i32, i32)> {
+        match self {
+            Self::Free => None,
+            Self::A1x1 => Some((1, 1)),
+            Self::A4x3 => Some((4, 3)),
+            Self::A16x9 => Some((16, 9)),
+            Self::A9x16 => Some((9, 16)),
+        }
+    }
+
+    /// 菜单显示名（保留供诊断/扩展使用）
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Free => "自由",
+            Self::A1x1 => "1:1",
+            Self::A4x3 => "4:3",
+            Self::A16x9 => "16:9",
+            Self::A9x16 => "9:16",
+        }
+    }
+
+    fn from_ini(s: &str) -> Self {
+        match s {
+            "1:1" => Self::A1x1,
+            "4:3" => Self::A4x3,
+            "16:9" => Self::A16x9,
+            "9:16" => Self::A9x16,
+            _ => Self::Free,
+        }
+    }
+
+    fn to_ini(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::A1x1 => "1:1",
+            Self::A4x3 => "4:3",
+            Self::A16x9 => "16:9",
+            Self::A9x16 => "9:16",
+        }
+    }
+}
+
 /// 运行配置
 #[derive(Clone, Copy)]
 pub struct Config {
@@ -47,10 +103,19 @@ pub struct Config {
     pub save: SaveMode,
     /// 保存格式
     pub format: ImgFormat,
-    /// 全局热键（修饰键 MOD_* 位组合，不含 MOD_NOREPEAT——注册时统一附加）
+    /// 截图完成后弹气泡提示（错误不受此开关影响）
+    pub notify: bool,
+    /// 框选宽高比
+    pub aspect: Aspect,
+    /// 固定截取区域（虚拟屏物理像素；None = 未设置）
+    pub fixed: Option<RECT>,
+    /// 框选热键（修饰键 MOD_* 位组合，不含 MOD_NOREPEAT——注册时统一附加）
     pub hotkey_mods: u32,
-    /// 热键主键虚拟键码
+    /// 框选热键主键虚拟键码
     pub hotkey_vk: u32,
+    /// 固定区域热键（vk 为 0 = 未设置）
+    pub hotkey2_mods: u32,
+    pub hotkey2_vk: u32,
 }
 
 impl Default for Config {
@@ -59,9 +124,14 @@ impl Default for Config {
             clipboard: true,
             save: SaveMode::Folder,
             format: ImgFormat::Png,
+            notify: true,
+            aspect: Aspect::Free,
+            fixed: None,
             hotkey_mods: 0,
             // 默认 PrintScreen 键（VK_SNAPSHOT）
             hotkey_vk: 0x2C,
+            hotkey2_mods: 0,
+            hotkey2_vk: 0,
         }
     }
 }
@@ -73,7 +143,7 @@ impl Config {
     }
 }
 
-/// 配置文件路径：exe 同目录优先，写不进去时回退 %LOCALAPPDATA%\Screenshot-rs
+/// 配置文件路径：exe 同目录优先，写不进去时回退 %LOCALAPPDATA%\SimpleShot
 pub fn config_path() -> PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -82,14 +152,13 @@ pub fn config_path() -> PathBuf {
             }
         }
     }
-    let dir = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default())
-        .join("Screenshot-rs");
+    let dir = PathBuf::from(std::env::var("LOCALAPPDATA").unwrap_or_default()).join("SimpleShot");
     let _ = std::fs::create_dir_all(&dir);
     dir.join("config.ini")
 }
 
 fn dir_writable(dir: &Path) -> bool {
-    let probe = dir.join(".screenshot-rs-probe");
+    let probe = dir.join(".simpleshot-probe");
     match std::fs::OpenOptions::new().create(true).append(true).open(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);
@@ -115,17 +184,47 @@ fn get_str(file: PCWSTR, sec: &[u16], key: &str) -> String {
     String::from_utf16_lossy(&buf[..n as usize])
 }
 
+/// 解析固定区域文本 "x1,y1,x2,y2"
+pub fn parse_fixed(s: &str) -> Option<RECT> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = s.split(',').map(|p| p.trim()).collect();
+    if parts.len() != 4 {
+        return None;
+    }
+    let v: Option<Vec<i32>> = parts.iter().map(|p| p.parse().ok()).collect();
+    let v = v?;
+    if v[2] > v[0] && v[3] > v[1] {
+        Some(RECT {
+            left: v[0],
+            top: v[1],
+            right: v[2],
+            bottom: v[3],
+        })
+    } else {
+        None
+    }
+}
+
+/// 固定区域序列化为文本
+pub fn format_fixed(rc: RECT) -> String {
+    format!("{},{},{},{}", rc.left, rc.top, rc.right, rc.bottom)
+}
+
 /// 加载配置，读不到的项保持默认值
 pub fn load(path: &Path) -> Config {
     let mut cfg = Config::default();
     let file_w = util::to_wide(&path.to_string_lossy());
     let file = PCWSTR(file_w.as_ptr());
     let sec_actions = util::to_wide("actions");
+    let sec_region = util::to_wide("region");
     let sec_hotkey = util::to_wide("hotkey");
 
-    let cb = get_str(file, &sec_actions, "clipboard");
-    if !cb.is_empty() {
-        cfg.clipboard = cb == "true" || cb == "1";
+    let v = get_str(file, &sec_actions, "clipboard");
+    if !v.is_empty() {
+        cfg.clipboard = v == "true" || v == "1";
     }
     match get_str(file, &sec_actions, "save").as_str() {
         "none" => cfg.save = SaveMode::None,
@@ -139,10 +238,27 @@ pub fn load(path: &Path) -> Config {
         "bmp" => cfg.format = ImgFormat::Bmp,
         _ => {}
     }
+    let v = get_str(file, &sec_actions, "notify");
+    if !v.is_empty() {
+        cfg.notify = v == "true" || v == "1";
+    }
+    let v = get_str(file, &sec_region, "aspect");
+    if !v.is_empty() {
+        cfg.aspect = Aspect::from_ini(&v);
+    }
+    let v = get_str(file, &sec_region, "fixed");
+    if let Some(rc) = parse_fixed(&v) {
+        cfg.fixed = Some(rc);
+    }
     let hk = get_str(file, &sec_hotkey, "key");
     if let Some((mods, vk)) = hotkey::parse_hotkey(&hk) {
         cfg.hotkey_mods = mods;
         cfg.hotkey_vk = vk;
+    }
+    let hk2 = get_str(file, &sec_hotkey, "key2");
+    if let Some((mods, vk)) = hotkey::parse_hotkey(&hk2) {
+        cfg.hotkey2_mods = mods;
+        cfg.hotkey2_vk = vk;
     }
     cfg
 }
@@ -152,8 +268,10 @@ pub fn save(cfg: &Config, path: &Path) {
     let file_w = util::to_wide(&path.to_string_lossy());
     let file = PCWSTR(file_w.as_ptr());
     let sec_actions = util::to_wide("actions");
+    let sec_region = util::to_wide("region");
     let sec_hotkey = util::to_wide("hotkey");
     let sa = PCWSTR(sec_actions.as_ptr());
+    let sr = PCWSTR(sec_region.as_ptr());
     let sh = PCWSTR(sec_hotkey.as_ptr());
 
     let put = |sec: PCWSTR, key: &str, val: &str| {
@@ -188,15 +306,17 @@ pub fn save(cfg: &Config, path: &Path) {
             ImgFormat::Bmp => "bmp",
         },
     );
+    put(sa, "notify", if cfg.notify { "true" } else { "false" });
+    put(sr, "aspect", cfg.aspect.to_ini());
+    put(sr, "fixed", &cfg.fixed.map(format_fixed).unwrap_or_default());
     put(
         sh,
         "key",
         &hotkey::format_hotkey(cfg.hotkey_mods, cfg.hotkey_vk),
     );
-}
-
-/// 取配置文件路径（供诊断）
-#[allow(dead_code)]
-pub fn probe() -> Res<PathBuf> {
-    Ok(config_path())
+    put(
+        sh,
+        "key2",
+        &hotkey::format_hotkey(cfg.hotkey2_mods, cfg.hotkey2_vk),
+    );
 }

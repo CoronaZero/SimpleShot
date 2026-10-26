@@ -48,6 +48,16 @@ pub fn perform(hwnd: HWND, cfg: &Config, pixels: Vec<u8>, w: i32, h: i32) {
         },
     }
 
+    // 提示策略：错误始终提示；成功提示受 notify 开关控制
+    if !cfg.notify {
+        if err_msgs.is_empty() {
+            // 全部成功（或无动作）：静默
+            return;
+        }
+        tray::balloon(hwnd, &err_msgs.join("；"));
+        return;
+    }
+
     let text = if ok_msgs.is_empty() && err_msgs.is_empty() {
         "未设置任何截图后动作，截图已丢弃".to_string()
     } else {

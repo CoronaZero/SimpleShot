@@ -1,4 +1,4 @@
-//! 全局热键：注册、文本解析/格式化、修改监听（临时低级键盘钩子）
+//! 全局热键：双热键注册（框选/固定区域）、文本解析/格式化、修改监听（临时低级键盘钩子）
 
 use crate::util::Res;
 use std::ffi::c_void;
@@ -15,29 +15,34 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WH_KEYBOARD_LL, WM_APP, WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
-/// 热键注册 ID
-pub const HOTKEY_ID: i32 = 1;
+/// 热键注册 ID：交互框选截图
+pub const HOTKEY_CAPTURE: i32 = 1;
+/// 热键注册 ID：固定区域截图
+pub const HOTKEY_FIXED: i32 = 2;
 
-/// 主窗口消息：钩子捕获到新组合（wparam=mods, lparam=vk）
+/// 主窗口消息：钩子捕获到新组合
+/// wparam = (目标热键 ID << 16) | 修饰键，lparam = 虚拟键码
 pub const M_HOOK_SET: u32 = WM_APP + 4;
 /// 主窗口消息：用户按 Esc 取消修改
 pub const M_HOOK_CANCEL: u32 = WM_APP + 5;
 
 static HOOK_HANDLE: AtomicIsize = AtomicIsize::new(0);
 static HOOK_TARGET: AtomicIsize = AtomicIsize::new(0);
+/// 本次监听要修改的热键 ID
+static LISTEN_ID: AtomicIsize = AtomicIsize::new(0);
 
 /// 注册全局热键（内部统一附加 MOD_NOREPEAT 防按住重复触发）
-pub fn register(hwnd: HWND, mods: u32, vk: u32) -> Res<()> {
+pub fn register(hwnd: HWND, id: i32, mods: u32, vk: u32) -> Res<()> {
     unsafe {
-        RegisterHotKey(Some(hwnd), HOTKEY_ID, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk)
+        RegisterHotKey(Some(hwnd), id, HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT.0), vk)
             .map_err(|e| format!("热键 {} 注册失败：{e}", format_hotkey(mods, vk)))
     }
 }
 
 /// 注销全局热键
-pub fn unregister(hwnd: HWND) {
+pub fn unregister(hwnd: HWND, id: i32) {
     unsafe {
-        let _ = UnregisterHotKey(Some(hwnd), HOTKEY_ID);
+        let _ = UnregisterHotKey(Some(hwnd), id);
     }
 }
 
@@ -122,8 +127,11 @@ fn vk_to_name(vk: u32) -> String {
     }
 }
 
-/// (修饰键, 虚拟键码) -> 可读文本（如 "Ctrl+Alt+A"）
+/// (修饰键, 虚拟键码) -> 可读文本（如 "Ctrl+Alt+A"）；vk=0 返回空串（未设置）
 pub fn format_hotkey(mods: u32, vk: u32) -> String {
+    if vk == 0 {
+        return String::new();
+    }
     let mut s = String::new();
     if mods & MOD_CONTROL.0 != 0 {
         s += "Ctrl+";
@@ -157,8 +165,10 @@ fn is_modifier(vk: u32) -> bool {
 }
 
 /// 进入快捷键监听模式：安装临时低级键盘钩子，捕获一次按键组合
-pub fn start_listening(hwnd: HWND) -> Res<()> {
+/// `id` 指明本次修改的是哪个热键（HOTKEY_CAPTURE / HOTKEY_FIXED）
+pub fn start_listening(hwnd: HWND, id: i32) -> Res<()> {
     HOOK_TARGET.store(hwnd.0 as isize, Ordering::SeqCst);
+    LISTEN_ID.store(id as isize, Ordering::SeqCst);
     unsafe {
         let h = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), None, 0)
             .map_err(|e| format!("安装键盘钩子失败：{e}"))?;
@@ -217,10 +227,11 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 if GetAsyncKeyState(VK_LWIN.0 as i32) < 0 || GetAsyncKeyState(VK_RWIN.0 as i32) < 0 {
                     mods |= MOD_WIN.0;
                 }
+                let listen_id = LISTEN_ID.load(Ordering::SeqCst) as usize;
                 let _ = PostMessageW(
                     Some(HWND(target as *mut c_void)),
                     M_HOOK_SET,
-                    WPARAM(mods as usize),
+                    WPARAM((listen_id << 16) | mods as usize),
                     LPARAM(vk as isize),
                 );
                 stop_listening();
