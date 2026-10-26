@@ -31,7 +31,7 @@ use windows::Win32::Graphics::Gdi::{
     BLENDFUNCTION, HBITMAP, RGN_DIFF,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, VK_ESCAPE};
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture, SetFocus, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, EnumWindows, GetClassNameW, GetCursorPos,
     GetWindowLongPtrW, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
@@ -155,8 +155,9 @@ pub fn create(app_hwnd: HWND, dib: &Dib, aspect: Option<(i32, i32)>) -> Res<HWND
             Some(Box::into_raw(st) as *const c_void),
         )
         .map_err(|e| format!("创建遮罩窗口失败：{e}"))?;
-        // 尽力前置以获取键盘焦点（Esc 取消需要焦点）
+        // 尽力前置并获取键盘焦点（Esc 取消；焦点拿不到时由 Esc 兜底热键接管）
         let _ = SetForegroundWindow(hwnd);
+        let _ = SetFocus(Some(hwnd));
         Ok(hwnd)
     }
 }

@@ -30,11 +30,12 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyIcon, DestroyWindow, DispatchMessageW,
     GetSystemMetrics, GetWindowLongPtrW, GWLP_USERDATA, GetMessageW, HICON, MessageBoxW,
-    PostQuitMessage, RegisterClassExW, SetWindowLongPtrW, TranslateMessage, WINDOW_EX_STYLE,
-    WINDOW_STYLE, WNDCLASSEXW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY, WM_NCCREATE,
-    CREATESTRUCTW, MB_ICONERROR, MB_OK, MSG, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    PostMessageW, PostQuitMessage, RegisterClassExW, SetWindowLongPtrW, TranslateMessage,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_HOTKEY,
+    WM_KEYDOWN, WM_NCCREATE, CREATESTRUCTW, MB_ICONERROR, MB_OK, MSG, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::VK_ESCAPE;
 
 use hotkey::{M_HOOK_CANCEL, M_HOOK_SET};
 use overlay::{M_REGION_CANCEL, M_REGION_DONE};
@@ -214,6 +215,18 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 match wparam.0 as i32 {
                     hotkey::HOTKEY_CAPTURE => start_capture(app),
                     hotkey::HOTKEY_FIXED => fixed_capture(app),
+                    // Esc 兜底热键：键盘焦点不在遮罩时也能取消截图
+                    hotkey::HOTKEY_ESCAPE => {
+                        if let Some(h) = app.hoverlay {
+                            // 转发给遮罩窗口走统一取消路径（M_REGION_CANCEL 清理）
+                            let _ = PostMessageW(
+                                Some(h),
+                                WM_KEYDOWN,
+                                WPARAM(VK_ESCAPE.0 as usize),
+                                LPARAM(0),
+                            );
+                        }
+                    }
                     _ => {}
                 }
                 LRESULT(0)
@@ -233,10 +246,13 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 LRESULT(0)
             }
             M_REGION_DONE => {
+                // 先注销 Esc 兜底热键，再执行动作（避免干扰保存对话框的 Esc 语义）
+                hotkey::unregister(hwnd, hotkey::HOTKEY_ESCAPE);
                 on_region_done(hwnd, app);
                 LRESULT(0)
             }
             M_REGION_CANCEL => {
+                hotkey::unregister(hwnd, hotkey::HOTKEY_ESCAPE);
                 app.hoverlay = None;
                 app.dib = None;
                 LRESULT(0)
@@ -259,6 +275,7 @@ unsafe extern "system" fn main_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam
                 tray::remove(hwnd);
                 hotkey::unregister(hwnd, hotkey::HOTKEY_CAPTURE);
                 hotkey::unregister(hwnd, hotkey::HOTKEY_FIXED);
+                hotkey::unregister(hwnd, hotkey::HOTKEY_ESCAPE);
                 let _ = DestroyIcon(app.hicon);
                 PostQuitMessage(0);
                 // 释放应用状态
@@ -287,6 +304,14 @@ fn start_capture(app: &mut App) {
         Ok(h) => {
             app.hoverlay = Some(h);
             app.dib = Some(dib);
+            // 注册 Esc 兜底热键：键盘焦点丢失时仍可取消截图；
+            // 注册失败（被占用）时退回 WM_KEYDOWN 焦点路径
+            let _ = hotkey::register(
+                app.hmain,
+                hotkey::HOTKEY_ESCAPE,
+                0,
+                VK_ESCAPE.0 as u32,
+            );
         }
         Err(e) => tray::balloon(app.hmain, &e),
     }

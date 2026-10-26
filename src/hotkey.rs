@@ -19,6 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 pub const HOTKEY_CAPTURE: i32 = 1;
 /// 热键注册 ID：固定区域截图
 pub const HOTKEY_FIXED: i32 = 2;
+/// 热键注册 ID：遮罩期间注册的 Esc 兜底热键（不依赖键盘焦点）
+pub const HOTKEY_ESCAPE: i32 = 3;
 
 /// 主窗口消息：钩子捕获到新组合
 /// wparam = (目标热键 ID << 16) | 修饰键，lparam = 虚拟键码
