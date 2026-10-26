@@ -39,58 +39,30 @@ impl ImgFormat {
     }
 }
 
-/// 框选宽高比档位
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Aspect {
-    Free,
-    A1x1,
-    A4x3,
-    A16x9,
-    A9x16,
+/// 解析宽高比文本："free"/空 → None（自由）；"w:h" → Some((w, h))
+pub fn parse_aspect(s: &str) -> Option<(i32, i32)> {
+    let s = s.trim();
+    if s.is_empty() || s.eq_ignore_ascii_case("free") {
+        return None;
+    }
+    let parts: Vec<&str> = s.split(':').map(|p| p.trim()).collect();
+    if parts.len() != 2 {
+        return None;
+    }
+    let w: i32 = parts[0].parse().ok()?;
+    let h: i32 = parts[1].parse().ok()?;
+    if w > 0 && h > 0 {
+        Some((w, h))
+    } else {
+        None
+    }
 }
 
-impl Aspect {
-    /// 返回 (宽, 高) 比例；自由比例返回 None
-    pub fn ratio(self) -> Option<(i32, i32)> {
-        match self {
-            Self::Free => None,
-            Self::A1x1 => Some((1, 1)),
-            Self::A4x3 => Some((4, 3)),
-            Self::A16x9 => Some((16, 9)),
-            Self::A9x16 => Some((9, 16)),
-        }
-    }
-
-    /// 菜单显示名（保留供诊断/扩展使用）
-    #[allow(dead_code)]
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Free => "自由",
-            Self::A1x1 => "1:1",
-            Self::A4x3 => "4:3",
-            Self::A16x9 => "16:9",
-            Self::A9x16 => "9:16",
-        }
-    }
-
-    fn from_ini(s: &str) -> Self {
-        match s {
-            "1:1" => Self::A1x1,
-            "4:3" => Self::A4x3,
-            "16:9" => Self::A16x9,
-            "9:16" => Self::A9x16,
-            _ => Self::Free,
-        }
-    }
-
-    fn to_ini(self) -> &'static str {
-        match self {
-            Self::Free => "free",
-            Self::A1x1 => "1:1",
-            Self::A4x3 => "4:3",
-            Self::A16x9 => "16:9",
-            Self::A9x16 => "9:16",
-        }
+/// 宽高比序列化为文本
+pub fn format_aspect(a: Option<(i32, i32)>) -> String {
+    match a {
+        None => "free".into(),
+        Some((w, h)) => format!("{w}:{h}"),
     }
 }
 
@@ -105,8 +77,8 @@ pub struct Config {
     pub format: ImgFormat,
     /// 截图完成后弹气泡提示（错误不受此开关影响）
     pub notify: bool,
-    /// 框选宽高比
-    pub aspect: Aspect,
+    /// 框选宽高比（宽, 高）；None = 自由
+    pub aspect: Option<(i32, i32)>,
     /// 固定截取区域（虚拟屏物理像素；None = 未设置）
     pub fixed: Option<RECT>,
     /// 框选热键（修饰键 MOD_* 位组合，不含 MOD_NOREPEAT——注册时统一附加）
@@ -125,7 +97,7 @@ impl Default for Config {
             save: SaveMode::Folder,
             format: ImgFormat::Png,
             notify: true,
-            aspect: Aspect::Free,
+            aspect: None,
             fixed: None,
             hotkey_mods: 0,
             // 默认 PrintScreen 键（VK_SNAPSHOT）
@@ -244,7 +216,7 @@ pub fn load(path: &Path) -> Config {
     }
     let v = get_str(file, &sec_region, "aspect");
     if !v.is_empty() {
-        cfg.aspect = Aspect::from_ini(&v);
+        cfg.aspect = parse_aspect(&v);
     }
     let v = get_str(file, &sec_region, "fixed");
     if let Some(rc) = parse_fixed(&v) {
@@ -307,7 +279,7 @@ pub fn save(cfg: &Config, path: &Path) {
         },
     );
     put(sa, "notify", if cfg.notify { "true" } else { "false" });
-    put(sr, "aspect", cfg.aspect.to_ini());
+    put(sr, "aspect", &format_aspect(cfg.aspect));
     put(sr, "fixed", &cfg.fixed.map(format_fixed).unwrap_or_default());
     put(
         sh,

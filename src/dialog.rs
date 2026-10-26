@@ -1,7 +1,7 @@
-//! 固定区域手动输入对话框（纯 Win32，无依赖）
+//! 输入对话框（纯 Win32，无依赖）：固定区域四坐标 / 宽高比两数值两种模式
 //!
 //! 模态运行：run() 内部跑局部消息循环（IsDialogMessage 提供 Tab 导航、
-//! Esc=取消、Enter=确定），返回用户确认的矩形；取消/关闭返回 None。
+//! Esc=取消、Enter=确定），返回用户确认的结果；取消/关闭返回 None。
 
 use crate::util;
 use std::ffi::c_void;
@@ -32,9 +32,35 @@ const IDC_X1: i32 = 101;
 const IDC_Y1: i32 = 102;
 const IDC_X2: i32 = 103;
 const IDC_Y2: i32 = 104;
+
+/// 对话框类型
+pub enum DlgKind {
+    /// 固定区域：四个坐标输入
+    FixedRect,
+    /// 宽高比：两个正整数输入
+    Aspect,
+}
+
+/// 对话框初始参数
+pub struct DlgInit {
+    pub kind: DlgKind,
+    /// 固定区域模式的预填值
+    pub fixed: RECT,
+    /// 宽高比模式的预填值 (宽, 高)
+    pub aspect: (i32, i32),
+}
+
+/// 对话框输出
+pub enum DlgOut {
+    Rect(RECT),
+    Ratio(i32, i32),
+}
+
 /// 对话框返回的结果；None = 用户取消
-static RESULT: Mutex<Option<RECT>> = Mutex::new(None);
+static RESULT: Mutex<Option<DlgOut>> = Mutex::new(None);
 static DLG_HWND: AtomicIsize = AtomicIsize::new(0);
+/// 当前对话框类型：0 = 固定区域，1 = 宽高比
+static DLG_KIND: AtomicIsize = AtomicIsize::new(0);
 static WHITE_BRUSH: AtomicIsize = AtomicIsize::new(0);
 
 /// 对话框是否已打开（防重入）
@@ -42,12 +68,20 @@ pub fn is_open() -> bool {
     DLG_HWND.load(Ordering::SeqCst) != 0
 }
 
-/// 打开模态输入对话框，返回用户确认的固定区域；取消/关闭返回 None
-pub fn run(owner: HWND, initial: RECT) -> Option<RECT> {
+/// 打开模态输入对话框，返回用户确认的结果；取消/关闭返回 None
+pub fn run(owner: HWND, init: DlgInit) -> Option<DlgOut> {
     unsafe {
         if is_open() {
             return None;
         }
+        DLG_KIND.store(
+            if matches!(init.kind, DlgKind::Aspect) {
+                1
+            } else {
+                0
+            },
+            Ordering::SeqCst,
+        );
         register_class();
         if let Ok(mut g) = RESULT.lock() {
             *g = None;
@@ -58,7 +92,12 @@ pub fn run(owner: HWND, initial: RECT) -> Option<RECT> {
         let x = (GetSystemMetrics(SM_CXSCREEN) - win_w) / 2;
         let y = (GetSystemMetrics(SM_CYSCREEN) - win_h) / 2;
         let name_w = util::to_wide(CLASS);
-        let title_w = util::to_wide("设置固定区域");
+        let title = if DLG_KIND.load(Ordering::SeqCst) == 1 {
+            "设置宽高比"
+        } else {
+            "设置固定区域"
+        };
+        let title_w = util::to_wide(title);
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
             PCWSTR(name_w.as_ptr()),
@@ -71,7 +110,7 @@ pub fn run(owner: HWND, initial: RECT) -> Option<RECT> {
             Some(owner),
             None,
             None,
-            Some(Box::into_raw(Box::new(initial)) as *const c_void),
+            Some(Box::into_raw(Box::new(init)) as *const c_void),
         )
         .ok()?;
         DLG_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
@@ -140,8 +179,8 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
         match msg {
             WM_CREATE => {
                 let cs = &*(lparam.0 as *const windows::Win32::UI::WindowsAndMessaging::CREATESTRUCTW);
-                let initial = *(cs.lpCreateParams as *const RECT);
-                create_controls(hwnd, initial);
+                let init = &*(cs.lpCreateParams as *const DlgInit);
+                create_controls(hwnd, init);
                 LRESULT(0)
             }
             // IsDialogMessage 的 Enter：询问默认按钮
@@ -162,10 +201,16 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
                 let (id, code) = ((wparam.0 & 0xFFFF) as i32, (wparam.0 >> 16) as i32);
                 if code == BN_CLICKED as i32 {
                     if id == IDOK.0 {
-                        match read_rect(hwnd) {
-                            Ok(rc) => {
+                        // 按对话框类型读取并验证
+                        let parsed = if DLG_KIND.load(Ordering::SeqCst) == 1 {
+                            read_aspect(hwnd).map(|(w, h)| DlgOut::Ratio(w, h))
+                        } else {
+                            read_rect(hwnd).map(DlgOut::Rect)
+                        };
+                        match parsed {
+                            Ok(out) => {
                                 if let Ok(mut g) = RESULT.lock() {
-                                    *g = Some(rc);
+                                    *g = Some(out);
                                 }
                                 let _ = DestroyWindow(hwnd);
                             }
@@ -200,8 +245,8 @@ unsafe extern "system" fn dlg_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam:
     }
 }
 
-/// 创建子控件并预填初始值
-unsafe fn create_controls(hwnd: HWND, initial: RECT) {
+/// 创建子控件并预填初始值（按对话框类型布局）
+unsafe fn create_controls(hwnd: HWND, init: &DlgInit) {
     unsafe {
         let hinst = GetModuleHandleW(None).unwrap_or_default();
         let font = GetStockObject(DEFAULT_GUI_FONT);
@@ -241,35 +286,63 @@ unsafe fn create_controls(hwnd: HWND, initial: RECT) {
         let bs_ok = WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_DEFPUSHBUTTON as u32);
         let bs_cancel = WINDOW_STYLE(WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | BS_PUSHBUTTON as u32);
 
-        mk("STATIC", "左上 X", ss, WINDOW_EX_STYLE(0), 0, 12, 15, 52, 16);
-        mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 172, 15, 16, 16);
-        mk("STATIC", "右下 X", ss, WINDOW_EX_STYLE(0), 0, 12, 47, 52, 16);
-        mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 172, 47, 16, 16);
-
-        let e_x1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X1, 70, 12, 90, 22);
-        let e_y1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y1, 192, 12, 90, 22);
-        let e_x2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X2, 70, 44, 90, 22);
-        let e_y2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y2, 192, 44, 90, 22);
-
         mk("BUTTON", "确定", bs_ok, WINDOW_EX_STYLE(0), IDOK.0, 80, 84, 70, 26);
         mk("BUTTON", "取消", bs_cancel, WINDOW_EX_STYLE(0), 2, 170, 84, 70, 26);
-        mk(
-            "STATIC",
-            "坐标为虚拟屏物理像素，右下角须大于左上角",
-            ss,
-            WINDOW_EX_STYLE(0),
-            0,
-            12,
-            120,
-            300,
-            16,
-        );
 
-        // 预填初始值
-        set_edit_text(e_x1, &initial.left.to_string());
-        set_edit_text(e_y1, &initial.top.to_string());
-        set_edit_text(e_x2, &initial.right.to_string());
-        set_edit_text(e_y2, &initial.bottom.to_string());
+        match init.kind {
+            DlgKind::FixedRect => {
+                mk("STATIC", "左上 X", ss, WINDOW_EX_STYLE(0), 0, 12, 15, 52, 16);
+                mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 172, 15, 16, 16);
+                mk("STATIC", "右下 X", ss, WINDOW_EX_STYLE(0), 0, 12, 47, 52, 16);
+                mk("STATIC", "Y", ss, WINDOW_EX_STYLE(0), 0, 172, 47, 16, 16);
+
+                let e_x1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X1, 70, 12, 90, 22);
+                let e_y1 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y1, 192, 12, 90, 22);
+                let e_x2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X2, 70, 44, 90, 22);
+                let e_y2 = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y2, 192, 44, 90, 22);
+
+                mk(
+                    "STATIC",
+                    "坐标为虚拟屏物理像素，右下角须大于左上角",
+                    ss,
+                    WINDOW_EX_STYLE(0),
+                    0,
+                    12,
+                    120,
+                    300,
+                    16,
+                );
+
+                let rc = init.fixed;
+                set_edit_text(e_x1, &rc.left.to_string());
+                set_edit_text(e_y1, &rc.top.to_string());
+                set_edit_text(e_x2, &rc.right.to_string());
+                set_edit_text(e_y2, &rc.bottom.to_string());
+            }
+            DlgKind::Aspect => {
+                mk("STATIC", "宽", ss, WINDOW_EX_STYLE(0), 0, 12, 15, 52, 16);
+                mk("STATIC", "高", ss, WINDOW_EX_STYLE(0), 0, 12, 47, 52, 16);
+
+                let e_w = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_X1, 70, 12, 90, 22);
+                let e_h = mk("EDIT", "", es, WINDOW_EX_STYLE(0), IDC_Y1, 70, 44, 90, 22);
+
+                mk(
+                    "STATIC",
+                    "输入两个正整数，如 21:9；锁定时拖拽按此比例",
+                    ss,
+                    WINDOW_EX_STYLE(0),
+                    0,
+                    12,
+                    120,
+                    300,
+                    16,
+                );
+
+                let (w, h) = init.aspect;
+                set_edit_text(e_w, &w.to_string());
+                set_edit_text(e_h, &h.to_string());
+            }
+        }
     }
 }
 
@@ -280,7 +353,7 @@ unsafe fn set_edit_text(hwnd: HWND, text: &str) {
     }
 }
 
-/// 读取四个输入框并校验
+/// 读取四个输入框并校验（固定区域模式）
 unsafe fn read_rect(hwnd: HWND) -> Result<RECT, String> {
     unsafe {
         let x1 = read_edit(hwnd, IDC_X1);
@@ -299,6 +372,21 @@ unsafe fn read_rect(hwnd: HWND) -> Result<RECT, String> {
             right: x2,
             bottom: y2,
         })
+    }
+}
+
+/// 读取宽高两个输入框并校验（宽高比模式）
+unsafe fn read_aspect(hwnd: HWND) -> Result<(i32, i32), String> {
+    unsafe {
+        let w = read_edit(hwnd, IDC_X1);
+        let h = read_edit(hwnd, IDC_Y1);
+        let (Some(w), Some(h)) = (w, h) else {
+            return Err("请输入宽与高".into());
+        };
+        if w <= 0 || h <= 0 {
+            return Err("宽高须为正整数".into());
+        }
+        Ok((w, h))
     }
 }
 

@@ -20,7 +20,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MENU_ITEM_FLAGS, MF_GRAYED, LoadImageW, SetForegroundWindow, TrackPopupMenu,
     TPM_BOTTOMALIGN, TPM_RIGHTBUTTON, WM_APP,
 };
-use crate::config::Aspect;
 
 /// 托盘回调消息（NOTIFYICONDATAW.uCallbackMessage）
 pub const WM_TRAY: u32 = WM_APP + 1;
@@ -48,6 +47,8 @@ pub const TID_ASPECT_1_1: u16 = 171;
 pub const TID_ASPECT_4_3: u16 = 172;
 pub const TID_ASPECT_16_9: u16 = 173;
 pub const TID_ASPECT_9_16: u16 = 174;
+pub const TID_ASPECT_CUSTOM: u16 = 175;
+pub const TID_ASPECT_LAST: u16 = 176;
 pub const TID_FIXED_NONE: u16 = 180;
 pub const TID_FIXED_LAST: u16 = 181;
 pub const TID_FIXED_INPUT: u16 = 182;
@@ -158,13 +159,29 @@ pub fn show_menu(hwnd: HWND, cfg: &Config, has_last: bool) {
 
         // ---------- 设置子菜单 ----------
         let settings = CreatePopupMenu().unwrap_or_default();
-        // 宽高比（五档）
+        // 宽高比（自由/五档预设/自定义/上次截图比例）
         let aspect = CreatePopupMenu().unwrap_or_default();
-        append(aspect, radio(cfg.aspect == Aspect::Free), TID_ASPECT_FREE as usize, "自由");
-        append(aspect, radio(cfg.aspect == Aspect::A1x1), TID_ASPECT_1_1 as usize, "1:1");
-        append(aspect, radio(cfg.aspect == Aspect::A4x3), TID_ASPECT_4_3 as usize, "4:3");
-        append(aspect, radio(cfg.aspect == Aspect::A16x9), TID_ASPECT_16_9 as usize, "16:9");
-        append(aspect, radio(cfg.aspect == Aspect::A9x16), TID_ASPECT_9_16 as usize, "9:16");
+        append(aspect, radio(cfg.aspect.is_none()), TID_ASPECT_FREE as usize, "自由");
+        append(aspect, radio(cfg.aspect == Some((1, 1))), TID_ASPECT_1_1 as usize, "1:1");
+        append(aspect, radio(cfg.aspect == Some((4, 3))), TID_ASPECT_4_3 as usize, "4:3");
+        append(aspect, radio(cfg.aspect == Some((16, 9))), TID_ASPECT_16_9 as usize, "16:9");
+        append(aspect, radio(cfg.aspect == Some((9, 16))), TID_ASPECT_9_16 as usize, "9:16");
+        // 当前值为非预设时在自定义项上显示当前值
+        let is_preset = matches!(
+            cfg.aspect,
+            None | Some((1, 1)) | Some((4, 3)) | Some((16, 9)) | Some((9, 16))
+        );
+        let custom_text = match cfg.aspect {
+            Some((w, h)) if !is_preset => format!("自定义…（当前 {w}:{h}）"),
+            _ => "自定义…".to_string(),
+        };
+        append(aspect, MF_STRING, TID_ASPECT_CUSTOM as usize, &custom_text);
+        append(
+            aspect,
+            if has_last { MF_STRING } else { MF_STRING | MF_GRAYED },
+            TID_ASPECT_LAST as usize,
+            "使用上次截图比例",
+        );
         let w = util::to_wide("宽高比");
         let _ = AppendMenuW(settings, MF_STRING | MF_POPUP, aspect.0 as usize, PCWSTR(w.as_ptr()));
         // 固定区域

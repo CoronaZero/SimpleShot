@@ -39,11 +39,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use hotkey::{M_HOOK_CANCEL, M_HOOK_SET};
 use overlay::{M_REGION_CANCEL, M_REGION_DONE};
 use tray::{
-    TID_ASPECT_16_9, TID_ASPECT_1_1, TID_ASPECT_4_3, TID_ASPECT_9_16, TID_ASPECT_FREE,
-    TID_AUTOSTART, TID_CAPTURE, TID_CLIPBOARD, TID_EXIT, TID_FIXED_INPUT, TID_FIXED_LAST,
-    TID_FIXED_NONE, TID_FIXED_SHOT, TID_FMT_BMP, TID_FMT_JPEG, TID_FMT_PNG, TID_HOTKEY,
-    TID_HOTKEY2, TID_NOTIFY, TID_SAVE_ASK, TID_SAVE_FOLDER, TID_SAVE_NONE, WM_LBUTTONUP_VAL,
-    WM_RBUTTONUP_VAL, WM_TRAY,
+    TID_ASPECT_16_9, TID_ASPECT_1_1, TID_ASPECT_4_3, TID_ASPECT_9_16, TID_ASPECT_CUSTOM,
+    TID_ASPECT_FREE, TID_ASPECT_LAST, TID_AUTOSTART, TID_CAPTURE, TID_CLIPBOARD, TID_EXIT,
+    TID_FIXED_INPUT, TID_FIXED_LAST, TID_FIXED_NONE, TID_FIXED_SHOT, TID_FMT_BMP, TID_FMT_JPEG,
+    TID_FMT_PNG, TID_HOTKEY, TID_HOTKEY2, TID_NOTIFY, TID_SAVE_ASK, TID_SAVE_FOLDER,
+    TID_SAVE_NONE, WM_LBUTTONUP_VAL, WM_RBUTTONUP_VAL, WM_TRAY,
 };
 
 const MAIN_CLASS: &str = "SimpleShotMsgWnd";
@@ -282,7 +282,7 @@ fn start_capture(app: &mut App) {
             return;
         }
     };
-    match overlay::create(app.hmain, &dib, app.cfg.aspect.ratio()) {
+    match overlay::create(app.hmain, &dib, app.cfg.aspect) {
         Ok(h) => {
             app.hoverlay = Some(h);
             app.dib = Some(dib);
@@ -337,7 +337,6 @@ fn on_region_done(hwnd: HWND, app: &mut App) {
 
 /// 托盘菜单命令分发
 fn on_command(hwnd: HWND, app: &mut App, id: u16) {
-    use config::Aspect;
     match id {
         TID_CAPTURE => start_capture(app),
         TID_FIXED_SHOT => fixed_capture(app),
@@ -373,24 +372,56 @@ fn on_command(hwnd: HWND, app: &mut App, id: u16) {
         }
         // ---------- 宽高比 ----------
         TID_ASPECT_FREE => {
-            app.cfg.aspect = Aspect::Free;
+            app.cfg.aspect = None;
             config::save(&app.cfg, &app.cfg_path);
         }
         TID_ASPECT_1_1 => {
-            app.cfg.aspect = Aspect::A1x1;
+            app.cfg.aspect = Some((1, 1));
             config::save(&app.cfg, &app.cfg_path);
         }
         TID_ASPECT_4_3 => {
-            app.cfg.aspect = Aspect::A4x3;
+            app.cfg.aspect = Some((4, 3));
             config::save(&app.cfg, &app.cfg_path);
         }
         TID_ASPECT_16_9 => {
-            app.cfg.aspect = Aspect::A16x9;
+            app.cfg.aspect = Some((16, 9));
             config::save(&app.cfg, &app.cfg_path);
         }
         TID_ASPECT_9_16 => {
-            app.cfg.aspect = Aspect::A9x16;
+            app.cfg.aspect = Some((9, 16));
             config::save(&app.cfg, &app.cfg_path);
+        }
+        TID_ASPECT_CUSTOM => {
+            if dialog::is_open() {
+                return;
+            }
+            let cur = app.cfg.aspect.unwrap_or((16, 9));
+            let init = dialog::DlgInit {
+                kind: dialog::DlgKind::Aspect,
+                fixed: RECT::default(),
+                aspect: cur,
+            };
+            if let Some(dialog::DlgOut::Ratio(w, h)) = dialog::run(hwnd, init) {
+                app.cfg.aspect = Some((w, h));
+                config::save(&app.cfg, &app.cfg_path);
+                tray::balloon(hwnd, &format!("宽高比已锁定为 {w}:{h}"));
+            }
+        }
+        TID_ASPECT_LAST => {
+            // 化简上次选区的宽高为最简整数比
+            if let Some(rc) = app.last_region {
+                let w = rc.right - rc.left;
+                let h = rc.bottom - rc.top;
+                if w > 0 && h > 0 {
+                    let g = gcd(w, h);
+                    app.cfg.aspect = Some((w / g, h / g));
+                    config::save(&app.cfg, &app.cfg_path);
+                    tray::balloon(
+                        hwnd,
+                        &format!("宽高比已锁定为 {}:{}", w / g, h / g),
+                    );
+                }
+            }
         }
         // ---------- 固定区域 ----------
         TID_FIXED_NONE => {
@@ -417,7 +448,12 @@ fn on_command(hwnd: HWND, app: &mut App, id: u16) {
                 return;
             }
             let initial = app.cfg.fixed.unwrap_or_else(default_fixed_rect);
-            if let Some(rc) = dialog::run(hwnd, initial) {
+            let init = dialog::DlgInit {
+                kind: dialog::DlgKind::FixedRect,
+                fixed: initial,
+                aspect: (16, 9),
+            };
+            if let Some(dialog::DlgOut::Rect(rc)) = dialog::run(hwnd, init) {
                 app.cfg.fixed = Some(rc);
                 config::save(&app.cfg, &app.cfg_path);
                 tray::balloon(
@@ -457,6 +493,16 @@ fn on_command(hwnd: HWND, app: &mut App, id: u16) {
         },
         _ => {}
     }
+}
+
+/// 最大公约数（宽高比化简用）
+fn gcd(mut a: i32, mut b: i32) -> i32 {
+    while b != 0 {
+        let t = a % b;
+        a = b;
+        b = t;
+    }
+    a.abs().max(1)
 }
 
 /// 输入对话框的默认值：屏幕中心 400×300
